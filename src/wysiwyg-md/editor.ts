@@ -1,30 +1,77 @@
 import { baseKeymap } from 'prosemirror-commands'
 import { dropCursor } from 'prosemirror-dropcursor'
 import { gapCursor } from 'prosemirror-gapcursor'
-import { history } from 'prosemirror-history'
+import { tableEditing } from 'prosemirror-tables'
+import { closeHistory, history } from 'prosemirror-history'
 import { keymap } from 'prosemirror-keymap'
 import { EditorState } from 'prosemirror-state'
 import { EditorView } from 'prosemirror-view'
+import type { Node as PMNode } from 'prosemirror-model'
 import { buildInputRules } from './input-rules'
+import { createBlockDragHandle } from './block-drag-handle'
+import type { BlockDragHandle } from './block-drag-handle'
 import { imagePasteDropPlugin, imageUploadPlaceholderPlugin, startImageUpload } from './image-upload'
 import { createImageNodeView } from './image-node-view'
+import { filePasteDropPlugin, fileUploadPlaceholderPlugin, startFileUpload } from './file-upload'
 import { videoPasteDropPlugin, videoUploadPlaceholderPlugin, startVideoUpload } from './video-upload'
 import { createVideoNodeView } from './video-node-view'
 import { buildKeymap } from './keymap'
+import { insertCaption, insertEmoji } from './commands'
+import { createEmojiTypeahead } from './emoji-typeahead'
+import { createCaptionTypeahead } from './caption-typeahead'
+import { emojiInputPlugin } from './emoji-input'
+import type { EmojiTypeaheadHandle } from './emoji-typeahead'
+import type { CaptionTypeaheadHandle } from './caption-typeahead'
 import { parseMarkdown, serializeMarkdown } from './markdown-io'
 import { schema } from './schema'
+import { getSvgIcon, SVG_ICONS_UPDATED_EVENT } from './svg-icons'
 import { createToolbar } from './toolbar'
+import { createTableNodeView } from './table-node-view'
+import { createMermaidNodeView } from './mermaid-node-view'
 import type { ToolbarHandle } from './toolbar'
-import type { WysiwygMarkdownEditorOptions } from './types'
+import type { MarkdownEditorMode, WysiwygMarkdownEditorOptions } from './types'
 import './styles.css'
 
 export class WysiwygMarkdownEditor {
   private readonly editorView: EditorView
   private readonly rootEl: HTMLElement
   private readonly mountEl: HTMLElement
+  private readonly rawEl: HTMLTextAreaElement
+  private readonly modeButtons: Record<MarkdownEditorMode, HTMLButtonElement>
+  private readonly fullscreenButton: HTMLButtonElement
   private readonly toolbarHandle: ToolbarHandle | null
+  private readonly blockDragHandle: BlockDragHandle
+  private readonly emojiTypeahead: EmojiTypeaheadHandle
+  private readonly captionTypeahead: CaptionTypeaheadHandle
   private readonly options: WysiwygMarkdownEditorOptions
   private editable: boolean
+  private mode: MarkdownEditorMode = 'display'
+
+  private readonly onSvgIconsUpdated = (): void => {
+    const { state } = this.editorView
+    const replacements: { from: number; to: number; node: PMNode }[] = []
+    state.doc.descendants((node, pos, parent) => {
+      if (node.type === schema.nodes.svg_icon && !getSvgIcon(node.attrs.name)) {
+        replacements.push({
+          from: pos, to: pos + node.nodeSize,
+          node: schema.text(`:${node.attrs.name}:`, node.marks),
+        })
+        return
+      }
+      if (!node.isText || parent?.type.spec.code || schema.marks.code.isInSet(node.marks)) return
+      for (const match of node.text!.matchAll(/:([A-Za-z][A-Za-z0-9_-]*):/g)) {
+        if (!getSvgIcon(match[1])) continue
+        replacements.push({
+          from: pos + match.index, to: pos + match.index + match[0].length,
+          node: schema.nodes.svg_icon.create({ name: match[1] }, null, node.marks),
+        })
+      }
+    })
+    if (!replacements.length) return
+    const tr = state.tr.setMeta('addToHistory', false).setMeta('svgRegistryUpdate', true)
+    for (const { from, to, node } of replacements.reverse()) tr.replaceWith(from, to, node)
+    this.editorView.dispatch(tr)
+  }
 
   constructor(container: HTMLElement, options: WysiwygMarkdownEditorOptions = {}) {
     this.options = options
@@ -32,11 +79,66 @@ export class WysiwygMarkdownEditor {
 
     this.rootEl = document.createElement('div')
     this.rootEl.className = 'wysiwyg-md-editor'
+    this.rootEl.classList.toggle('is-readonly', !this.editable)
+
+    const modeControls = document.createElement('div')
+    modeControls.className = 'wysiwyg-md-mode-controls'
+    const makeModeButton = (mode: MarkdownEditorMode, label: string) => {
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.className = 'wysiwyg-md-mode-button'
+      button.textContent = label
+      button.addEventListener('click', () => this.setMode(mode))
+      modeControls.append(button)
+      return button
+    }
+    this.modeButtons = {
+      display: makeModeButton('display', 'Visual editor'),
+      raw: makeModeButton('raw', 'Markdown'),
+      preview: makeModeButton('preview', 'Preview'),
+    }
+    this.fullscreenButton = document.createElement('button')
+    this.fullscreenButton.type = 'button'
+    this.fullscreenButton.className = 'wysiwyg-md-fullscreen-button'
+    this.fullscreenButton.title = 'Toggle fullscreen'
+    this.fullscreenButton.setAttribute('aria-label', 'Toggle fullscreen')
+    this.fullscreenButton.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 2.5H2.5V6M10 2.5h3.5V6M2.5 10v3.5H6M13.5 10v3.5H10"/></svg>'
+    this.fullscreenButton.addEventListener('click', () => {
+      this.rootEl.classList.toggle('is-fullscreen')
+      this.fullscreenButton.setAttribute('aria-pressed', String(this.rootEl.classList.contains('is-fullscreen')))
+    })
+    modeControls.append(this.fullscreenButton)
+
+    this.rawEl = document.createElement('textarea')
+    this.rawEl.className = 'wysiwyg-md-raw'
+    this.rawEl.setAttribute('aria-label', 'Raw Markdown')
+    this.rawEl.spellcheck = false
+    this.rawEl.readOnly = !this.editable
+    this.rawEl.placeholder = options.placeholder ?? 'Write Markdown…'
+    this.rawEl.value = options.value ?? ''
+    this.rawEl.hidden = true
+    this.rawEl.addEventListener('input', () => {
+      const doc = parseMarkdown(this.rawEl.value)
+      if (doc.eq(this.editorView.state.doc)) {
+        this.options.onChange?.(this.getMarkdown())
+        return
+      }
+      this.editorView.dispatch(
+        this.editorView.state.tr
+          .replaceWith(0, this.editorView.state.doc.content.size, doc.content)
+          .setMeta('rawMarkdownInput', true),
+      )
+    })
 
     this.mountEl = document.createElement('div')
     this.mountEl.className = 'wysiwyg-md-content'
 
+    this.emojiTypeahead = createEmojiTypeahead()
+    this.captionTypeahead = createCaptionTypeahead()
     const plugins = [
+      this.emojiTypeahead.plugin,
+      this.captionTypeahead.plugin,
+      emojiInputPlugin(),
       keymap(buildKeymap(schema)),
       keymap(baseKeymap),
       buildInputRules(schema),
@@ -45,6 +147,8 @@ export class WysiwygMarkdownEditor {
       gapCursor(),
       imageUploadPlaceholderPlugin(),
       videoUploadPlaceholderPlugin(),
+      fileUploadPlaceholderPlugin(),
+      tableEditing(),
     ]
 
     if (options.uploadImage) {
@@ -53,6 +157,10 @@ export class WysiwygMarkdownEditor {
 
     if (options.uploadVideo) {
       plugins.push(videoPasteDropPlugin(options.uploadVideo, options.onVideoUploadError))
+    }
+
+    if (options.uploadFile) {
+      plugins.push(filePasteDropPlugin(options.uploadFile, options.onFileUploadError))
     }
 
     const state = EditorState.create({
@@ -64,6 +172,8 @@ export class WysiwygMarkdownEditor {
       state,
       editable: () => this.editable,
       nodeViews: {
+        table: createTableNodeView,
+        mermaid: createMermaidNodeView,
         image: createImageNodeView(options.uploadImage, options.onUploadError),
         video: createVideoNodeView(options.uploadVideo, options.onVideoUploadError),
       },
@@ -71,11 +181,17 @@ export class WysiwygMarkdownEditor {
         const newState = this.editorView.state.apply(tr)
         this.editorView.updateState(newState)
         if (tr.docChanged) {
-          this.options.onChange?.(this.getMarkdown())
+          this.blockDragHandle?.reset()
+          if (!tr.getMeta('rawMarkdownInput')) {
+            this.rawEl.value = serializeMarkdown(newState.doc)
+          }
+          if (!tr.getMeta('svgRegistryUpdate')) this.options.onChange?.(this.getMarkdown())
         }
         this.toolbarHandle?.update()
       },
     })
+
+    this.blockDragHandle = createBlockDragHandle(this.editorView, this.mountEl)
 
     if (options.toolbar ?? true) {
       this.toolbarHandle = createToolbar(this.editorView, {
@@ -83,27 +199,67 @@ export class WysiwygMarkdownEditor {
         onUploadError: options.onUploadError,
         uploadVideo: options.uploadVideo,
         onVideoUploadError: options.onVideoUploadError,
+        uploadFile: options.uploadFile,
+        onFileUploadError: options.onFileUploadError,
       })
+      this.toolbarHandle.el.appendChild(modeControls)
       this.rootEl.appendChild(this.toolbarHandle.el)
     } else {
       this.toolbarHandle = null
+      this.rootEl.appendChild(modeControls)
     }
 
     this.rootEl.appendChild(this.mountEl)
+    this.rootEl.appendChild(this.rawEl)
     container.appendChild(this.rootEl)
+    window.addEventListener(SVG_ICONS_UPDATED_EVENT, this.onSvgIconsUpdated)
+    this.setMode(options.mode ?? 'display')
   }
 
   getMarkdown(): string {
-    return serializeMarkdown(this.editorView.state.doc)
+    return this.rawEl.value
+  }
+
+  getMode(): MarkdownEditorMode {
+    return this.mode
+  }
+
+  setMode(mode: MarkdownEditorMode): void {
+    if (mode !== 'display') {
+      this.emojiTypeahead.close()
+      this.captionTypeahead.close()
+    }
+    if (this.mode !== mode) this.editorView.dispatch(closeHistory(this.editorView.state.tr))
+    this.mode = mode
+    this.mountEl.hidden = mode === 'raw'
+    this.rawEl.hidden = mode !== 'raw'
+    this.rootEl.classList.toggle('is-preview', mode === 'preview')
+    this.editorView.setProps({ editable: () => this.editable && this.mode !== 'preview' })
+    this.blockDragHandle.reset()
+    this.toolbarHandle?.el.classList.toggle('is-view-only', mode !== 'display')
+    this.updateModeButtons()
+  }
+
+  private updateModeButtons(): void {
+    for (const [mode, button] of Object.entries(this.modeButtons)) {
+      const active = mode === this.mode
+      button.classList.toggle('is-active', active)
+      button.setAttribute('aria-pressed', String(active))
+    }
   }
 
   setMarkdown(markdown: string): void {
+    this.emojiTypeahead.close()
+    this.captionTypeahead.close()
     const doc = parseMarkdown(markdown)
     const state = EditorState.create({
       doc,
       plugins: this.editorView.state.plugins,
     })
     this.editorView.updateState(state)
+    this.blockDragHandle.reset()
+    this.rawEl.value = markdown
+    this.toolbarHandle?.update()
   }
 
   insertImage(file: File): void {
@@ -116,13 +272,36 @@ export class WysiwygMarkdownEditor {
     startVideoUpload(this.editorView, file, this.options.uploadVideo, this.options.onVideoUploadError)
   }
 
+  insertFile(file: File): void {
+    if (!this.options.uploadFile) return
+    startFileUpload(this.editorView, file, this.options.uploadFile, this.options.onFileUploadError)
+  }
+
+  /** Inserts a Unicode emoji at the current cursor or replaces the current selection. */
+  insertEmoji(emoji: string): void {
+    insertEmoji(this.editorView, emoji)
+  }
+
+  /** Inserts a caption from caption.json using its four-part key. */
+  insertCaption(key: string): void {
+    insertCaption(this.editorView, key)
+  }
+
   focus(): void {
-    this.editorView.focus()
+    if (this.mode === 'raw') this.rawEl.focus()
+    else if (this.mode === 'display') this.editorView.focus()
   }
 
   setEditable(editable: boolean): void {
+    if (!editable) {
+      this.emojiTypeahead.close()
+      this.captionTypeahead.close()
+    }
     this.editable = editable
-    this.editorView.setProps({ editable: () => this.editable })
+    this.rootEl.classList.toggle('is-readonly', !editable)
+    this.rawEl.readOnly = !editable
+    this.editorView.setProps({ editable: () => this.editable && this.mode !== 'preview' })
+    this.blockDragHandle.reset()
   }
 
   isEmpty(): boolean {
@@ -131,6 +310,8 @@ export class WysiwygMarkdownEditor {
   }
 
   destroy(): void {
+    window.removeEventListener(SVG_ICONS_UPDATED_EVENT, this.onSvgIconsUpdated)
+    this.blockDragHandle.destroy()
     this.toolbarHandle?.destroy()
     this.editorView.destroy()
     this.rootEl.remove()

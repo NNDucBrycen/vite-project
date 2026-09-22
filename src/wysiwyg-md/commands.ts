@@ -3,6 +3,10 @@ import { NodeSelection } from 'prosemirror-state'
 import type { EditorState } from 'prosemirror-state'
 import type { EditorView } from 'prosemirror-view'
 import { schema } from './schema'
+import { openTextDialog } from './text-dialog'
+import { getSvgIcon } from './svg-icons'
+import { splitEmojiText } from './twemoji'
+import { getCaption } from './captions'
 
 export function isMarkActive(state: EditorState, markType: MarkType): boolean {
   const { from, $from, to, empty } = state.selection
@@ -24,7 +28,7 @@ export function isLinkActive(state: EditorState): boolean {
   return isMarkActive(state, schema.marks.link)
 }
 
-export function toggleLink(view: EditorView): void {
+export async function toggleLink(view: EditorView): Promise<void> {
   const { state, dispatch } = view
   const { from, to, empty } = state.selection
   if (empty) return
@@ -35,30 +39,9 @@ export function toggleLink(view: EditorView): void {
     return
   }
 
-  const url = window.prompt('Link URL')
+  const url = await openTextDialog({ title: 'Link URL', confirmLabel: 'Add link' })
   if (!url) return
-  dispatch(state.tr.addMark(from, to, schema.marks.link.create({ href: url })))
-  view.focus()
-}
-
-export function isTooltipActive(state: EditorState): boolean {
-  return isMarkActive(state, schema.marks.tooltip)
-}
-
-export function toggleTooltip(view: EditorView): void {
-  const { state, dispatch } = view
-  const { from, to, empty } = state.selection
-  if (empty) return
-
-  if (isTooltipActive(state)) {
-    dispatch(state.tr.removeMark(from, to, schema.marks.tooltip))
-    view.focus()
-    return
-  }
-
-  const content = window.prompt('Tooltip content')
-  if (!content) return
-  dispatch(state.tr.addMark(from, to, schema.marks.tooltip.create({ content })))
+  view.dispatch(view.state.tr.addMark(from, to, schema.marks.link.create({ href: url })))
   view.focus()
 }
 
@@ -80,29 +63,54 @@ function getActiveMarkAttr<T>(
   return value
 }
 
-export function isFontSizeActive(state: EditorState): boolean {
-  return isMarkActive(state, schema.marks.fontSize)
-}
-
-export function getActiveFontSize(state: EditorState): string | null {
-  return getActiveMarkAttr<string>(state, schema.marks.fontSize, 'size')
-}
-
-export function setFontSize(view: EditorView, size: string): void {
-  const { state, dispatch } = view
-  const { from, to, empty } = state.selection
-  if (empty) return
-
-  let tr = state.tr.removeMark(from, to, schema.marks.fontSize)
-  if (size) tr = tr.addMark(from, to, schema.marks.fontSize.create({ size }))
-  dispatch(tr)
-  view.focus()
-}
-
 export function insertHorizontalRule(view: EditorView): void {
   const { state, dispatch } = view
   const { schema, tr } = state
   dispatch(tr.replaceSelectionWith(schema.nodes.horizontal_rule.create()).scrollIntoView())
+  view.focus()
+}
+
+/** Inserts a 3-column table with a header row and two editable body rows. */
+export function insertTable(view: EditorView, borderless = false): void {
+  const { table, table_row: row, table_header: header, table_cell: cell } = schema.nodes
+  const makeCell = (type: typeof cell) => type.createAndFill()!
+  const makeRow = (type: typeof cell) =>
+    row.create(null, [makeCell(type), makeCell(type), makeCell(type)])
+
+  const tableNode = table.create(
+    { borderless },
+    [makeRow(header), makeRow(cell), makeRow(cell)],
+  )
+
+  view.dispatch(view.state.tr.replaceSelectionWith(tableNode).scrollIntoView())
+  view.focus()
+}
+
+/** Inserts a Unicode emoji rendered with Twemoji at the current selection. */
+export function insertEmoji(view: EditorView, emoji: string): void {
+  if (!emoji) return
+
+  const { state, dispatch } = view
+  const parts = splitEmojiText(emoji)
+  const node = parts.length === 1 && parts[0].emoji
+    ? state.schema.nodes.emoji.create({ emoji })
+    : state.schema.text(emoji)
+  dispatch(state.tr.replaceSelectionWith(node, true).scrollIntoView())
+  view.focus()
+}
+
+export function insertSvgIcon(view: EditorView, name: string): void {
+  if (!getSvgIcon(name)) return
+
+  const { state, dispatch } = view
+  dispatch(state.tr.replaceSelectionWith(state.schema.nodes.svg_icon.create({ name }), true).scrollIntoView())
+  view.focus()
+}
+
+export function insertCaption(view: EditorView, key: string): void {
+  if (!getCaption(key)) return
+  const { state, dispatch } = view
+  dispatch(state.tr.replaceSelectionWith(state.schema.nodes.caption.create({ key }), true).scrollIntoView())
   view.focus()
 }
 
@@ -121,6 +129,35 @@ export function setTextColor(view: EditorView, color: string): void {
 
   let tr = state.tr.removeMark(from, to, schema.marks.textColor)
   if (color) tr = tr.addMark(from, to, schema.marks.textColor.create({ color }))
+  dispatch(tr)
+  view.focus()
+}
+
+export function isHighlightActive(state: EditorState): boolean {
+  return isMarkActive(state, schema.marks.highlight)
+}
+
+export function toggleHighlight(view: EditorView): void {
+  const { state, dispatch } = view
+  const { from, to, empty } = state.selection
+  if (empty) return
+
+  const mark = schema.marks.highlight
+  const tr = state.doc.rangeHasMark(from, to, mark)
+    ? state.tr.removeMark(from, to, mark)
+    : state.tr.addMark(from, to, mark.create())
+  dispatch(tr)
+  view.focus()
+}
+
+/** Applies a background color to the current selection as a highlight. */
+export function setHighlightColor(view: EditorView, color: string): void {
+  const { state, dispatch } = view
+  const { from, to, empty } = state.selection
+  if (empty) return
+
+  let tr = state.tr.removeMark(from, to, schema.marks.highlight)
+  if (color) tr = tr.addMark(from, to, schema.marks.highlight.create({ color }))
   dispatch(tr)
   view.focus()
 }

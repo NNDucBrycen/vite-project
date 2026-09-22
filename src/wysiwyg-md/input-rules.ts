@@ -5,6 +5,7 @@ import {
   textblockTypeInputRule,
   wrappingInputRule,
 } from 'prosemirror-inputrules'
+import { getSvgIcon } from './svg-icons'
 
 // regexp must have the form /(^|\s)MARKERtextMARKER$/ — group 1 is the
 // boundary character (kept as-is), group 2 is the wrapped text. Marker
@@ -42,6 +43,12 @@ export function buildInputRules(schema: Schema) {
     markInputRule(/(^|\s)__([^_]+)__$/, schema.marks.strong),
     markInputRule(/(^|\s)\*([^*]+)\*$/, schema.marks.em),
     markInputRule(/(^|\s)_([^_]+)_$/, schema.marks.em),
+    new InputRule(/:([A-Za-z][A-Za-z0-9_-]*):$/, (state, match, start, end) => {
+      const { $from } = state.selection
+      if ($from.parent.type.spec.code || schema.marks.code.isInSet(state.storedMarks ?? $from.marks())
+        || !getSvgIcon(match[1])) return null
+      return state.tr.replaceWith(start, end, schema.nodes.svg_icon.create({ name: match[1] }))
+    }),
     new InputRule(/^(?:---|\*\*\*|___)$/, (state, _match, start, end) =>
       state.tr.replaceRangeWith(start, end, schema.nodes.horizontal_rule.create()),
     ),

@@ -1,0 +1,23 @@
+[
+  {
+    "CAPTION_ID": "CAPTION_1",
+    "BUSINESS_ID": "BUSINESS_1",
+    "APPLICATION_ID": "APPLICATION_1",
+    "WORK_ID": "WORK_ID",
+    "LABEL": "Caption 1"
+  },
+  {
+    "CAPTION_ID": "CAPTION_2",
+    "BUSINESS_ID": "BUSINESS_2",
+    "APPLICATION_ID": "APPLICATION_2",
+    "WORK_ID": "",
+    "LABEL": "Caption 2"
+  },
+  {
+    "CAPTION_ID": "CAPTION_3",
+    "BUSINESS_ID": "BUSINESS_3",
+    "APPLICATION_ID": "",
+    "WORK_ID": "",
+    "LABEL": "Caption 3"
+  }
+]
