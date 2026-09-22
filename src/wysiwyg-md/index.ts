@@ -1,2 +1,2 @@
 export { WysiwygMarkdownEditor } from './editor'
-export type { WysiwygMarkdownEditorOptions, UploadImageFn, UploadVideoFn } from './types'
+export type { MarkdownEditorMode, WysiwygMarkdownEditorOptions, UploadFileFn, UploadImageFn, UploadVideoFn } from './types'
